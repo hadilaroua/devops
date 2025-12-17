@@ -1,75 +1,93 @@
 pipeline {
     agent any
 
-    tools { 
+    tools {
         maven 'M2_HOME'
     }
 
     environment {
-        DOCKER_IMAGE = "asma32087/devopspipline:latest"
-        DOCKER_CREDENTIALS = "github-token"
+        // Nexus Docker Hosted repo
+        NEXUS_REGISTRY = "192.168.33.10:8085"
+        IMAGE_NAME     = "devops-app"
+        IMAGE_TAG      = "${BUILD_NUMBER}"
+
+        // Jenkins credentials IDs
+        NEXUS_CREDENTIALS = "nexus"
+        SONAR_TOKEN_ID    = "sonarqube-token"
     }
 
     stages {
+
         stage('Checkout Git') {
             steps {
-                git branch: 'main', 
-                    url: 'https://github.com/asma-arbi/DevopsGit.git'
+                git branch: 'main',
+                    url: 'https://github.com/hadilaroua/devops.git'
             }
         }
 
-        stage('Build with Maven') {
+        stage('Build & Unit Tests') {
             steps {
-                sh 'mvn clean package -DskipTests'
+                sh 'mvn clean test'
+            }
+        }
+
+        stage('JUnit Reports') {
+            steps {
+                junit '**/target/surefire-reports/*.xml'
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            environment {
+                SONAR_TOKEN = credentials('sonarqube-token')
+            }
+            steps {
+                sh '''
+                  mvn sonar:sonar \
+                  -Dsonar.projectKey=devops-pipeline \
+                  -Dsonar.host.url=http://192.168.33.10:9000 \
+                  -Dsonar.login=$SONAR_TOKEN
+                '''
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                sh 'docker build -t ${DOCKER_IMAGE} -f docker/Dockerfile .'
+                sh '''
+                  docker build \
+                  -t $NEXUS_REGISTRY/$IMAGE_NAME:$IMAGE_TAG \
+                  -f docker/Dockerfile .
+                '''
             }
         }
 
-        stage('Push Docker Image') {
+        stage('Push Image to Nexus') {
             steps {
                 withCredentials([usernamePassword(
-                    credentialsId: DOCKER_CREDENTIALS,
-                    passwordVariable: 'DOCKER_PASS',
-                    usernameVariable: 'DOCKER_USER'
+                    credentialsId: NEXUS_CREDENTIALS,
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASS'
                 )]) {
-                    script {
-                        int retries = 3
-                        for (int i = 1; i <= retries; i++) {
-                            try {
-                                // Properly separate commands to avoid shell errors
-                                sh '''
-                                    set -e
-                                    export DOCKER_CLIENT_TIMEOUT=300
-                                    export COMPOSE_HTTP_TIMEOUT=300
-                                    echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-                                    docker push ${DOCKER_IMAGE}
-                                '''
-                                echo "Docker push succeeded on attempt ${i}"
-                                break
-                            } catch (err) {
-                                echo "Push attempt ${i} failed. Retrying..."
-                                if (i == retries) { 
-                                    error("Docker push failed after ${retries} attempts")
-                                }
-                            }
-                        }
-                    }
+                    sh '''
+                      echo "$NEXUS_PASS" | docker login $NEXUS_REGISTRY \
+                      -u "$NEXUS_USER" --password-stdin
+
+                      docker push $NEXUS_REGISTRY/$IMAGE_NAME:$IMAGE_TAG
+                    '''
                 }
             }
         }
     }
 
     post {
-        success { 
-            echo 'Pipeline completed successfully!' 
+        success {
+            echo '✅ Pipeline completed successfully'
         }
-        failure { 
-            echo 'Pipeline failed. Check the logs!' 
+        failure {
+            echo '❌ Pipeline failed – check logs'
+        }
+        always {
+            cleanWs()
         }
     }
 }
